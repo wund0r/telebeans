@@ -1,0 +1,12 @@
+{
+  "timezone": "Europe/Belgrade",
+  "default_currency": "RSD",
+  "default_payment": "Assets:Bank:RSD",
+  "aliases": {
+    "дома": {"account": "Expenses:Food:Home", "narration": "Еда"},
+    "кафе": {"account": "Expenses:Food:Cafe", "narration": "Кафе"},
+    "аренда": {"account": "Expenses:Housing:Rent", "narration": "Аренда"}
+  },
+  "payments": {"нал": "Assets:Cash", "bank": "Assets:Bank"},
+  "reminders": []
+}

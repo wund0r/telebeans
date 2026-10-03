@@ -218,3 +218,15 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Go prototype and local ledger samples
+/bin/
+/telebeans
+*.db
+*.db-journal
+*.db-shm
+*.db-wal
+/all.beancount
+/current.beancount
+/config.json
+/config.local.json
