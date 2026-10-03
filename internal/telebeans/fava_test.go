@@ -32,3 +32,50 @@ func TestPatchPreservesSource(t *testing.T) {
 		}
 	}
 }
+
+func TestExchangeSourcePreservesTotalAndComments(t *testing.T) {
+	d := Draft{Date: "2026-09-12", Narration: "купил евро", Currency: "EUR", Payment: "Assets:Cash:RSD", Exchange: &Exchange{Account: "Assets:Cash:EUR", Minor: 50000, TotalMinor: 5900000, TotalCurrency: "RSD"}}
+	txn, err := d.Transaction("exchange")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Fava returns a normalized unit price, even though the source uses @@.
+	txn.Postings[0].Amount = "500 EUR @ 118 RSD"
+	source := `2026-09-12 * "купил евро"
+  telebeans_id: "exchange"
+  note: "kept in Fava"
+  Assets:Cash:EUR  500 EUR @@ 59000 RSD ; rate @ comment
+    note: "received"
+  Assets:Cash:RSD ; paid cash
+`
+	context := EntryContext{Entry: txn, Source: source}
+	parsed, err := DraftFromContext(context)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if parsed.Exchange == nil || parsed.Exchange.TotalMinor != 5900000 {
+		t.Fatalf("lost total: %+v", parsed)
+	}
+	parsed.Date = "2026-09-11"
+	parsed.Narration = "обмен"
+	parsed.Payment = "Assets:Raif:RSD"
+	parsed.Exchange.Minor = 300
+	parsed.Exchange.TotalMinor = 10000
+	patched, err := patchSource(context, parsed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, part := range []string{`2026-09-11 * "обмен"`, `note: "kept in Fava"`, `Assets:Cash:EUR  3 EUR @@ 100 RSD ; rate @ comment`, `note: "received"`, `Assets:Raif:RSD ; paid cash`} {
+		if !strings.Contains(patched, part) {
+			t.Fatalf("missing %s in:\n%s", part, patched)
+		}
+	}
+	// Reading the declared total avoids rounding a repeating unit price or inferred debit.
+	txn.Date = parsed.Date
+	txn.Narration = parsed.Narration
+	txn.Postings = []Posting{{Account: "Assets:Cash:EUR", Amount: "3 EUR @ 33.33333333333333333333333333 RSD"}, {Account: "Assets:Raif:RSD", Amount: "-99.99999999999999999999999999 RSD"}}
+	read, err := DraftFromContext(EntryContext{Entry: txn, Source: patched})
+	if err != nil || read.Exchange == nil || read.Exchange.Minor != 300 || read.Exchange.TotalMinor != 10000 {
+		t.Fatalf("repeating rate changed total: %+v %v", read, err)
+	}
+}

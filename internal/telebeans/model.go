@@ -34,6 +34,13 @@ type Expense struct {
 	Minor   int64  `json:"minor"`
 }
 
+type Exchange struct {
+	Account       string `json:"account"`
+	Minor         int64  `json:"minor"`
+	TotalMinor    int64  `json:"total_minor"`
+	TotalCurrency string `json:"total_currency"`
+}
+
 type Draft struct {
 	Date         string    `json:"date"`
 	Narration    string    `json:"narration"`
@@ -41,6 +48,14 @@ type Draft struct {
 	Payment      string    `json:"payment"`
 	UnknownAlias string    `json:"unknown_alias,omitempty"`
 	Expenses     []Expense `json:"expenses"`
+	Exchange     *Exchange `json:"exchange,omitempty"`
+}
+
+func (d Draft) PaymentCurrency() string {
+	if d.Exchange != nil {
+		return d.Exchange.TotalCurrency
+	}
+	return d.Currency
 }
 
 func ParseAmount(s string) (int64, error) {
@@ -87,6 +102,18 @@ func FormatAmount(n int64) string {
 
 func (d Draft) Transaction(id string) (Transaction, error) {
 	t := Transaction{Type: "Transaction", Date: d.Date, Flag: "*", Narration: d.Narration, Tags: []string{}, Links: []string{}, Meta: map[string]any{"telebeans_id": id}, Postings: []Posting{}}
+	if d.Exchange != nil {
+		e := d.Exchange
+		if len(d.Expenses) != 0 || d.Payment == "" || e.Account == "" || e.Minor <= 0 || e.TotalMinor <= 0 || e.TotalCurrency == "" || d.Currency == "" || e.TotalCurrency == d.Currency {
+			return t, fmt.Errorf("неверная сумма, валюта или счёт обмена")
+		}
+		t.Postings = []Posting{
+			{Account: e.Account, Amount: FormatAmount(e.Minor) + " " + d.Currency + " @@ " + FormatAmount(e.TotalMinor) + " " + e.TotalCurrency},
+			// An explicit debit keeps the total exact while Fava initially renders a unit price.
+			{Account: d.Payment, Amount: FormatAmount(-e.TotalMinor) + " " + e.TotalCurrency},
+		}
+		return t, nil
+	}
 	var total int64
 	if d.Payment == "" || len(d.Expenses) == 0 {
 		return t, fmt.Errorf("нужно выбрать счета")

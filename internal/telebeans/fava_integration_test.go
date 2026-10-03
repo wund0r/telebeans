@@ -238,4 +238,71 @@ func TestTelegramFavaWorkflow(t *testing.T) {
 	if fake.calls != before {
 		t.Fatal("repeated paid reminder")
 	}
+
+	checkExchange := func(id, date, payment, received, total, narration string) {
+		t.Helper()
+		e, err := f.Find(ctx, id)
+		if err != nil || e == nil {
+			t.Fatalf("missing exchange %s: %v; Telegram: %s", id, err, fake.latest)
+		}
+		d, err := DraftFromContext(*e)
+		if err != nil || d.Exchange == nil || d.Date != date || d.Currency != "EUR" || d.Payment != payment || d.Narration != narration || d.Exchange.Account != "Assets:Cash:EUR" || FormatAmount(d.Exchange.Minor) != received || FormatAmount(d.Exchange.TotalMinor) != total || d.Exchange.TotalCurrency != "RSD" {
+			t.Fatalf("wrong exchange: %+v %v", d, err)
+		}
+		foundTotal, foundInferred := false, false
+		for _, line := range strings.Split(e.Source, "\n") {
+			fields := strings.Join(strings.Fields(line), " ")
+			if fields == "Assets:Cash:EUR "+received+" EUR @@ "+total+" RSD" {
+				foundTotal = true
+			}
+			if fields == payment {
+				foundInferred = true
+			}
+		}
+		if !foundTotal || !foundInferred {
+			t.Fatalf("exchange source does not retain @@ and inferred payment:\n%s", e.Source)
+		}
+		i, err := state.Get(id)
+		if err != nil || i == nil || i.Draft != nil {
+			t.Fatalf("exchange mirrored in bot state: %+v %v", i, err)
+		}
+		var errors []json.RawMessage
+		if err = f.call(ctx, "GET", "errors", nil, nil, &errors); err != nil || len(errors) != 0 {
+			t.Fatalf("unbalanced exchange: %s %v", errors, err)
+		}
+	}
+	send("2026-09-12 евро 500 @@ 59000")
+	exchangeID := fmt.Sprintf("m123_%d", messageID)
+	checkExchange(exchangeID, "2026-09-12", "Assets:Cash:RSD", "500", "59000", "купил евро")
+	click("Оплата:")
+	for _, row := range fake.keyboard {
+		for _, button := range row {
+			if strings.Contains(button.Text, "EUR") {
+				t.Fatal("offered EUR as payment for an RSD purchase")
+			}
+		}
+	}
+	click("Raif › RSD")
+	checkExchange(exchangeID, "2026-09-12", "Assets:Raif:RSD", "500", "59000", "купил евро")
+	click("Изменить")
+	click("Сумма")
+	send("3 100")
+	checkExchange(exchangeID, "2026-09-12", "Assets:Raif:RSD", "3", "100", "купил евро")
+	click("Изменить")
+	click("Дата")
+	send("2026-09-11")
+	checkExchange(exchangeID, "2026-09-11", "Assets:Raif:RSD", "3", "100", "купил евро")
+	click("Изменить")
+	click("Описание")
+	send("обмен валюты")
+	checkExchange(exchangeID, "2026-09-11", "Assets:Raif:RSD", "3", "100", "обмен валюты")
+	click("Отменить")
+	e, err = f.Find(ctx, exchangeID)
+	if err != nil || e != nil {
+		t.Fatalf("exchange undo failed: %+v %v", e, err)
+	}
+	send("евро 3 @@ 100")
+	exchangeID = fmt.Sprintf("m123_%d", messageID)
+	checkExchange(exchangeID, "2026-10-03", "Assets:Cash:RSD", "3", "100", "купил евро")
+	click("Отменить")
 }

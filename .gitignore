@@ -221,6 +221,7 @@ __marimo__/
 
 # Go prototype and local ledger samples
 /bin/
+/data/
 /telebeans
 *.db
 *.db-journal

@@ -121,16 +121,18 @@ func (l Ledger) Choices(prefix, currency, date string) []string {
 	return result
 }
 func (l Ledger) Validate(d Draft) error {
-	validCurrency := false
-	for _, c := range append(append([]string{}, l.Currencies...), l.Options.OperatingCurrencies...) {
-		if c == d.Currency {
-			validCurrency = true
+	for _, wanted := range []string{d.Currency, d.PaymentCurrency()} {
+		validCurrency := false
+		for _, c := range append(append([]string{}, l.Currencies...), l.Options.OperatingCurrencies...) {
+			if c == wanted {
+				validCurrency = true
+			}
+		}
+		if !validCurrency {
+			return fmt.Errorf("неизвестная валюта: %s", wanted)
 		}
 	}
-	if !validCurrency {
-		return fmt.Errorf("неизвестная валюта: %s", d.Currency)
-	}
-	for _, a := range appendExpenseAccounts(d) {
+	for _, a := range draftAccounts(d) {
 		found := false
 		for _, candidate := range l.Accounts {
 			if a == candidate {
@@ -147,8 +149,11 @@ func (l Ledger) Validate(d Draft) error {
 	}
 	return nil
 }
-func appendExpenseAccounts(d Draft) []string {
+func draftAccounts(d Draft) []string {
 	a := []string{d.Payment}
+	if d.Exchange != nil {
+		return append(a, d.Exchange.Account)
+	}
 	for _, e := range d.Expenses {
 		a = append(a, e.Account)
 	}
@@ -182,8 +187,14 @@ func (f *Fava) Find(ctx context.Context, id string) (*EntryContext, error) {
 }
 func (f *Fava) Add(ctx context.Context, d Draft, id string) (*EntryContext, error) {
 	existing, err := f.Find(ctx, id)
-	if err != nil || existing != nil {
-		return existing, err
+	if err != nil {
+		return nil, err
+	}
+	if existing != nil {
+		if d.Exchange != nil {
+			return f.Edit(ctx, id, d)
+		}
+		return existing, nil
 	}
 	l, err := f.Ledger(ctx)
 	if err != nil {
@@ -202,6 +213,9 @@ func (f *Fava) Add(ctx context.Context, d Draft, id string) (*EntryContext, erro
 	e, err := f.Find(ctx, id)
 	if err == nil && e == nil {
 		err = fmt.Errorf("Fava accepted the entry, but it is not visible in the ledger; check Fava before retrying")
+	}
+	if err == nil && d.Exchange != nil {
+		return f.Edit(ctx, id, d)
 	}
 	return e, err
 }
@@ -239,7 +253,43 @@ func (f *Fava) Edit(ctx context.Context, id string, d Draft) (*EntryContext, err
 }
 
 func DraftFromEntry(t Transaction) (Draft, error) {
+	return draftFromEntry(t, "")
+}
+
+func DraftFromContext(e EntryContext) (Draft, error) {
+	return draftFromEntry(e.Entry, e.Source)
+}
+
+func draftFromEntry(t Transaction, source string) (Draft, error) {
 	d := Draft{Date: t.Date, Narration: t.Narration}
+	if len(t.Postings) == 2 {
+		bought, paid := strings.Fields(t.Postings[0].Amount), strings.Fields(t.Postings[1].Amount)
+		if len(bought) == 5 && (bought[2] == "@" || bought[2] == "@@") && len(paid) == 2 && strings.HasPrefix(t.Postings[0].Account, "Assets:") && strings.HasPrefix(t.Postings[1].Account, "Assets:") && strings.HasPrefix(paid[0], "-") && bought[4] == paid[1] && bought[1] != paid[1] {
+			received, err := ParseAmount(bought[0])
+			if err != nil {
+				return d, err
+			}
+			totalText := strings.TrimPrefix(paid[0], "-")
+			// @@ becomes a unit price in Beancount's parsed entries. Read the declared
+			// total from source, so a repeating rate never requires decimal arithmetic.
+			for _, line := range strings.Split(source, "\n") {
+				line, _, _ = strings.Cut(line, ";")
+				fields := strings.Fields(line)
+				if len(fields) == 6 && fields[0] == t.Postings[0].Account && fields[2] == bought[1] && fields[3] == "@@" && fields[5] == paid[1] {
+					totalText = fields[4]
+					break
+				}
+			}
+			total, err := ParseAmount(totalText)
+			if err != nil {
+				return d, err
+			}
+			d.Currency = bought[1]
+			d.Payment = t.Postings[1].Account
+			d.Exchange = &Exchange{Account: t.Postings[0].Account, Minor: received, TotalMinor: total, TotalCurrency: paid[1]}
+			return d, nil
+		}
+	}
 	for _, p := range t.Postings {
 		parts := strings.Fields(p.Amount)
 		if len(parts) != 2 {
@@ -270,10 +320,11 @@ func DraftFromEntry(t Transaction) (Draft, error) {
 
 var transactionHeader = regexp.MustCompile(`^\d{4}-\d{2}-\d{2}\s+\S+\s+(?:"(?:\\.|[^"\\])*"\s+)?("(?:\\.|[^"\\])*")`)
 var postingLine = regexp.MustCompile(`^(\s+)(\S+)(\s+)(-?\d+(?:\.\d+)?)(\s+)(\S+)(.*)$`)
+var assetPostingLine = regexp.MustCompile(`^([ \t]+)(Assets:\S+)([ \t]*)([^;]*)(;.*)?$`)
 
 // Patch only the header and posting values. Keep the ledger's metadata and comments.
 func patchSource(e EntryContext, d Draft) (string, error) {
-	original, err := DraftFromEntry(e.Entry)
+	original, err := DraftFromContext(e)
 	if err != nil {
 		return "", err
 	}
@@ -283,6 +334,9 @@ func patchSource(e EntryContext, d Draft) (string, error) {
 	}
 	if len(t.Postings) != len(e.Entry.Postings) {
 		return "", fmt.Errorf("нельзя менять число проводок")
+	}
+	if (original.Exchange == nil) != (d.Exchange == nil) {
+		return "", fmt.Errorf("нельзя менять тип транзакции")
 	}
 	lines := strings.Split(e.Source, "\n")
 	if len(lines) == 0 || len(lines[0]) < 10 {
@@ -295,6 +349,44 @@ func patchSource(e EntryContext, d Draft) (string, error) {
 			return "", fmt.Errorf("не найдено описание в записи")
 		}
 		lines[0] = lines[0][:match[2]] + strconv.Quote(d.Narration) + lines[0][match[3]:]
+	}
+	if d.Exchange != nil {
+		index := 0
+		for i := 1; i < len(lines); i++ {
+			m := assetPostingLine.FindStringSubmatch(lines[i])
+			if m == nil {
+				continue
+			}
+			if index >= len(t.Postings) || m[2] != e.Entry.Postings[index].Account {
+				return "", fmt.Errorf("проводки изменились вне бота; проверьте запись в Fava")
+			}
+			if strings.ContainsAny(m[4], "{}") {
+				return "", fmt.Errorf("редактирование обмена с учётом стоимости пока не поддерживается")
+			}
+			amount := t.Postings[index].Amount
+			// Let Beancount infer the RSD debit from the @@ total.
+			if index == 1 {
+				amount = ""
+			}
+			spacing := m[3]
+			if amount != "" && spacing == "" {
+				spacing = "  "
+			}
+			trailing := m[4][len(strings.TrimRight(m[4], " \t")):]
+			if amount == "" {
+				spacing = ""
+				trailing = ""
+			}
+			if m[5] != "" && trailing == "" {
+				trailing = " "
+			}
+			lines[i] = m[1] + t.Postings[index].Account + spacing + amount + trailing + m[5]
+			index++
+		}
+		if index != len(t.Postings) {
+			return "", fmt.Errorf("не удалось прочитать все проводки обмена")
+		}
+		return strings.Join(lines, "\n"), nil
 	}
 	index := 0
 	for i := 1; i < len(lines); i++ {

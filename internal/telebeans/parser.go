@@ -45,6 +45,14 @@ func ParseInput(text string, sent time.Time, cfg Config) (Draft, error) {
 		return d, err
 	}
 	account := m[2]
+	if strings.EqualFold(account, "евро") || strings.EqualFold(account, "EUR") {
+		return parseExchange(d, n, strings.Fields(m[4]), cfg)
+	}
+	for _, word := range strings.Fields(m[4]) {
+		if word == "@@" {
+			return d, fmt.Errorf("обмен: евро 500 @@ 59000")
+		}
+	}
 	alias, known := cfg.Aliases[strings.ToLower(account)]
 	if known {
 		account = alias.Account
@@ -77,6 +85,51 @@ func ParseInput(text string, sent time.Time, cfg Config) (Draft, error) {
 	}
 	if d.Narration == "" {
 		d.Narration = m[2]
+	}
+	return d, nil
+}
+
+func parseExchange(d Draft, received int64, words []string, cfg Config) (Draft, error) {
+	if len(words) > 0 && words[0] == "EUR" {
+		words = words[1:]
+	}
+	if len(words) < 2 || words[0] != "@@" {
+		return d, fmt.Errorf("обмен: евро 500 @@ 59000 [описание]")
+	}
+	total, err := ParseAmount(words[1])
+	if err != nil {
+		return d, err
+	}
+	words = words[2:]
+	if len(words) > 0 && currencyPattern.MatchString(words[0]) {
+		if words[0] != "RSD" {
+			return d, fmt.Errorf("покупка евро поддерживает оплату в RSD")
+		}
+		words = words[1:]
+	}
+	cash := cfg.Payments["нал"]
+	if cash == "" {
+		cash = "Assets:Cash"
+	}
+	d.Currency = "EUR"
+	d.Payment = cash + ":RSD"
+	d.Narration = "купил евро"
+	d.Exchange = &Exchange{Account: cash + ":EUR", Minor: received, TotalMinor: total, TotalCurrency: "RSD"}
+	if len(words) > 0 && strings.HasPrefix(words[0], "@") {
+		payment, ok := cfg.Payments[strings.TrimPrefix(words[0], "@")]
+		if !ok {
+			return d, fmt.Errorf("неизвестный способ оплаты: %s", words[0])
+		}
+		d.Payment = payment + ":RSD"
+		words = words[1:]
+	}
+	for _, word := range words {
+		if word == "@@" {
+			return d, fmt.Errorf("обмен: евро 500 [EUR] @@ 59000 [RSD] [@оплата] [описание]")
+		}
+	}
+	if len(words) > 0 {
+		d.Narration = strings.Join(words, " ")
 	}
 	return d, nil
 }

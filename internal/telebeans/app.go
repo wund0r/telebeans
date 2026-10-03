@@ -25,6 +25,7 @@ const helpText = `Формат: [дата] категория сумма [вал
 дома 350 @нал
 вчера аренда 400 EUR за октябрь
 дома 350 хлеб 2026-09-30
+евро 500 @@ 59000
 
 Дата YYYY-MM-DD может стоять в любом месте сообщения.
 
@@ -215,6 +216,10 @@ func (a *App) render(ctx context.Context, i *Interaction, text string, k Keyboar
 }
 func summary(d Draft) string {
 	lines := []string{d.Date + " · " + d.Narration}
+	if d.Exchange != nil {
+		e := d.Exchange
+		return strings.Join(append(lines, "Получено: "+FormatAmount(e.Minor)+" "+d.Currency+" → "+e.Account, "Оплата: "+FormatAmount(e.TotalMinor)+" "+e.TotalCurrency+" ← "+d.Payment), "\n")
+	}
 	for _, e := range d.Expenses {
 		lines = append(lines, FormatAmount(e.Minor)+" "+d.Currency+" → "+e.Account)
 	}
@@ -240,7 +245,7 @@ func (a *App) current(ctx context.Context, i *Interaction) (Draft, error) {
 	if e == nil {
 		return Draft{}, fmt.Errorf("транзакция уже удалена")
 	}
-	return DraftFromEntry(e.Entry)
+	return DraftFromContext(*e)
 }
 func (a *App) showSaved(ctx context.Context, i *Interaction) error {
 	d, err := a.current(ctx, i)
@@ -268,11 +273,11 @@ func (a *App) finish(ctx context.Context, i *Interaction) error {
 	if err != nil {
 		return err
 	}
-	if d.Expenses[0].Account == "" {
+	if d.Exchange == nil && d.Expenses[0].Account == "" {
 		return a.choose(ctx, i, "category", l.Choices("Expenses:", "", d.Date), 0)
 	}
 	if d.Payment == "" {
-		return a.choose(ctx, i, "payment", l.Choices("Assets:", d.Currency, d.Date), 0)
+		return a.choose(ctx, i, "payment", l.Choices("Assets:", d.PaymentCurrency(), d.Date), 0)
 	}
 	if err = a.State.Save(i); err != nil {
 		return err
@@ -372,7 +377,7 @@ func (a *App) callback(ctx context.Context, c Callback) error {
 		if err != nil {
 			return err
 		}
-		return a.choose(ctx, i, "payment", l.Choices("Assets:", d.Currency, d.Date), 0)
+		return a.choose(ctx, i, "payment", l.Choices("Assets:", d.PaymentCurrency(), d.Date), 0)
 	case "page":
 		if len(p) != 3 {
 			return fmt.Errorf("неверная кнопка")
@@ -443,7 +448,9 @@ func (a *App) callback(ctx context.Context, c Callback) error {
 		}
 		if p[0] == "amount" {
 			label = "Введите сумму"
-			if len(d.Expenses) > 1 {
+			if d.Exchange != nil {
+				label = "Введите сумму " + d.Currency + " и общую сумму " + d.PaymentCurrency() + " через пробел (например: 500 59000)"
+			} else if len(d.Expenses) > 1 {
 				label = "Введите суммы проводок через пробел, в указанном порядке"
 			}
 		}
@@ -483,6 +490,22 @@ func (a *App) finishInput(ctx context.Context, i *Interaction, text string) erro
 	switch i.Mode {
 	case "amount":
 		values := strings.Fields(text)
+		if d.Exchange != nil {
+			if len(values) != 2 {
+				return fmt.Errorf("введите две суммы через пробел: сумма %s и общая сумма %s", d.Currency, d.PaymentCurrency())
+			}
+			received, err := ParseAmount(values[0])
+			if err != nil {
+				return err
+			}
+			total, err := ParseAmount(values[1])
+			if err != nil {
+				return err
+			}
+			d.Exchange.Minor = received
+			d.Exchange.TotalMinor = total
+			break
+		}
 		if len(values) != len(d.Expenses) {
 			return fmt.Errorf("нужно ввести %d сумм через пробел; /cancel для отмены", len(d.Expenses))
 		}

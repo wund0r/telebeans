@@ -32,6 +32,28 @@ Requires Go 1.25+ and network access to Telegram and Fava. Long polling means th
 
 The bot reads `.env` from the working directory. Existing environment variables take precedence. Messages and buttons are accepted only from `TELEGRAM_USER_ID` in a private chat. Stop with Ctrl+C.
 
+## Docker
+
+Set up your local `config.json` and `.env` as above. Docker builds the Go binary and runs it with CA certificates for HTTPS and timezone data for the configured timezone.
+
+```sh
+mkdir -p data
+docker compose build
+docker compose run --rm telebeans check
+docker compose up -d
+docker compose logs -f telebeans
+```
+
+If you still need your Telegram user ID, use `docker compose run --rm telebeans whoami` and add the printed ID to `.env` before starting the service.
+
+Compose mounts `config.json` read-only and persists SQLite state in `./data/telebeans.db`. `TELEBEANS_CONFIG` in `.env` can select another host configuration file; inside the container it is always mounted at `/app/config.json`. Credentials are passed from `.env` at runtime. The build context excludes local config, credentials, databases, and ledger files.
+
+The container must resolve and reach your LAN Fava URL, plus Telegram's API. It uses outbound long polling and needs no published ports. Fava controls the production ledger files through its API.
+
+Stop the local bot before starting the container so only one instance polls Telegram. To carry over existing bot state, stop the local bot, create `data/`, and copy `telebeans.db` into `data/telebeans.db` before starting Compose.
+
+After editing `config.json`, run `docker compose restart telebeans`. After editing `.env` or updating the code, run `docker compose up -d --build`. Stop the deployment with `docker compose down`; the `data/` directory remains on the host.
+
 ## Enter an expense
 
 ```text
@@ -56,6 +78,27 @@ The bot reads `.env` from the working directory. Existing environment variables 
 - `/cancel` exits a pending text edit; `/help` shows examples.
 
 Try `дома 350`, change payment to cash, edit the amount, and undo. Verify the entry and its removal in production Fava.
+
+## Buy EUR with RSD
+
+```text
+2026-09-12 евро 500 @@ 59000
+евро 500 EUR @@ 59000 RSD @bank обмен валюты
+```
+
+`евро` (or `EUR`) buys the first amount in EUR for the **total** RSD amount after `@@`. Without a comment, the narration is `купил евро`. Dates work in any position, as for expenses.
+
+By default, both sides use cash: the `нал` payment shortcut's account prefix, or `Assets:Cash` if that shortcut is absent. The first example produces the following entry, plus the bot's `telebeans_id` metadata:
+
+```beancount
+2026-09-12 * "купил евро"
+  Assets:Cash:EUR  500 EUR @@ 59000 RSD
+  Assets:Cash:RSD
+```
+
+Beancount infers the RSD debit. `@bank` (or another configured payment shortcut) changes the RSD source account; EUR still goes into cash. The inline payment picker also offers RSD accounts. Change amount asks for both numbers, such as `500 59000`. Description, date, and undo buttons work as usual.
+
+The bot saves through Fava and retains `@@` in the ledger source. No rate calculation or decimal library is needed. This syntax currently supports buying EUR with RSD.
 
 ## Monthly bills
 
@@ -90,7 +133,7 @@ Fava/Beancount is the source of truth for accounts and saved transactions. SQLit
 
 Writes use Fava's `add_entries` and `source_slice` APIs. Editing patches the source returned by Fava with its checksum, keeping metadata and comments. Amounts use integer hundredths; SQLite is the only direct third-party Go dependency.
 
-This prototype targets the deployed Fava 1.30 API. It handles expenses and same-currency bill splits. Transfers, income, exchange rates, LLM guessing, and deployment packaging are later work. Parsing, Fava, Telegram, and state are separate components; a future suggestion provider can produce drafts without owning ledger writes.
+This prototype targets the deployed Fava 1.30 API. It handles expenses, same-currency bill splits, and EUR purchases with RSD. Other transfers, income, and LLM guessing are later work. Parsing, Fava, Telegram, and state are separate components; a future suggestion provider can produce drafts without owning ledger writes.
 
 ## Tests
 
@@ -106,4 +149,4 @@ python3 -m venv /tmp/telebeans-fava-test
 go test ./... -fava-test-binary /tmp/telebeans-fava-test/bin/fava
 ```
 
-The test launches Fava with a temporary ledger and simulates Telegram over HTTP. It exercises add, payment changes, edits, undo, EUR selection, learned aliases, repeated updates, and split bills. It never contacts production Fava or Telegram. Python is used only for the test server.
+The test launches Fava with a temporary ledger and simulates Telegram over HTTP. It exercises add, payment changes, edits, undo, EUR selection, learned aliases, repeated updates, split bills, and EUR purchases with total RSD prices. It never contacts production Fava or Telegram. Python is used only for the test server.

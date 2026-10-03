@@ -1,0 +1,19 @@
+services:
+  telebeans:
+    build: .
+    image: telebeans:local
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      TELEBEANS_CONFIG: /app/config.json
+      TELEBEANS_DB: /data/telebeans.db
+    volumes:
+      - type: bind
+        source: ${TELEBEANS_CONFIG:-./config.json}
+        target: /app/config.json
+        read_only: true
+        bind:
+          create_host_path: false
+      - ./data:/data
+
